@@ -12,15 +12,7 @@ dependencies {
     //testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.4.2'
 }
 
-application {
-    mainClassName = 'com.trivadis.request.processor.App'
-}
-
-test {
-    useJUnitPlatform()
-}
-
-sourceCompatibility = '11'
+mainClassName = 'com.trivadis.request.processor.App'
 
 jar {
     manifest {

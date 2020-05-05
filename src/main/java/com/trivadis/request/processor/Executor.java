@@ -13,7 +13,8 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 
 public class Executor {
@@ -23,7 +24,7 @@ public class Executor {
     private final BlockingQueue<Response> responses;
     private final ExecutorService executorService;
     private final ArrayList<Long> responseTimes;
-    private final AtomicInteger requestCounter = new AtomicInteger();
+    private final AtomicBoolean stopWaiting = new AtomicBoolean();
 
     public Executor(int responseSize, int requestCount, int processingThreadCount) {
         this.responseSize = responseSize;
@@ -31,6 +32,7 @@ public class Executor {
         requests = new ArrayBlockingQueue<>( 1, false );
         responses = new ArrayBlockingQueue<>( processingThreadCount, false );
         responseTimes = new ArrayList<>( requestCount );
+        stopWaiting.set(false);
 
         new Thread( this::processResponse, "processResponse" ).start();
         new Thread( this::generateRequests, "generateRequests" ).start();
@@ -45,6 +47,10 @@ public class Executor {
                 requests.put( new Request( i, Instant.now() ) );
             } catch ( InterruptedException e ) {
                 e.printStackTrace();
+                stopWaiting.set(true);
+            }
+            if (i == requestCount - 1 || 0 == i % (int)(requestCount * 0.05)) {
+                System.out.print(".");
             }
         }
         System.out.println( "finished generateRequests " + Thread.currentThread().getName() );
@@ -54,10 +60,9 @@ public class Executor {
         while ( true ) {
             try {
                 Request request = requests.take();
-                request.time = Instant.now();
                 responses.put( createResponseAndGarbage( request ) );
-                requestCounter.getAndIncrement();
             } catch ( InterruptedException e ) {
+                stopWaiting.set(true);
                 break;
             }
         }
@@ -65,14 +70,15 @@ public class Executor {
     }
 
     private Response createResponseAndGarbage(Request request) {
+        Instant start = request.time;
+        Instant end = Instant.now();
+        Duration duration = Duration.between( start, end );
+
         String valueStr = "";
         for ( int i = 0; i < responseSize; i++ ) {
             valueStr += (char) (32 + (request.index + i) % 95);
         }
         BigInteger hashCode = createHashCodeAndGarbage( valueStr );
-        Instant start = request.time;
-        Instant end = Instant.now();
-        Duration duration = Duration.between( start, end );
         return new Response( request.index, start, end, duration, valueStr, hashCode );
     }
 
@@ -87,25 +93,53 @@ public class Executor {
     }
 
     protected void processResponse() {
-        while ( !responses.isEmpty() || requestCounter.get() < requestCount ) {
+        // Wait until response received count matches expected request count.
+        int numProcessed = 0;
+        while ( numProcessed < requestCount ) {
             try {
-                Response response = responses.take();
-                long duration = response.duration.toMillis();
-                responseTimes.add( duration );
+                Response response = responses.poll(5, TimeUnit.SECONDS);
+                // When a timeout occurs, break if an error condition was found.
+                if ( response == null ) {
+                     if ( stopWaiting.get() ) {
+                          break;
+                     }
+                }
+                else {
+                     long duration = response.duration.toMillis();
+                     responseTimes.add( duration );
+                     numProcessed += 1;
+                }
             } catch ( InterruptedException e ) {
                 e.printStackTrace();
+                stopWaiting.set(true);
             }
         }
+        System.out.println( "finished processResponse " + Thread.currentThread().getName() + ". Procesed " + numProcessed );
         executorService.shutdownNow();
-        System.out.println( "finished processResponse " + Thread.currentThread().getName() );
         dumpStatistics();
     }
 
     private void dumpStatistics() {
+        int count = 0;
+        Long sum = 0L;
+        Long min = 0L;
+        Long max = 0L;
+        Collections.sort(responseTimes);
         try ( PrintWriter out = new PrintWriter( Files.newBufferedWriter( Paths.get( "response_times.txt" ) ) ) ) {
             for ( Long time : responseTimes ) {
                 out.println( time );
+                count += 1;
+                sum += time;
+                if ( time <= min || min == 0 ) {
+                    min = time;
+                }
+                if ( time >= max || max == 0 ) {
+                    max = time;
+                }
             }
+            String output = "Response time: average " + (sum / count) + ", median " + responseTimes.get((int)(count / 2)) + ", minimum " + min + ", maximum " + max + ".";
+            out.println(output);
+            System.out.println(output);
         } catch ( IOException e ) {
             throw new UncheckedIOException( e );
         }
